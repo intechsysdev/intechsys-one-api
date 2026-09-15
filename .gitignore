@@ -1,0 +1,22 @@
+# Compilación
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+*.user
+*.suo
+
+# Registros
+logs/
+*.log
+
+# Configuración con secretos
+appsettings.Production.json
+appsettings.*.Local.json
+*.pfx
+
+# Editores
+.vs/
+.idea/
+.DS_Store
+Thumbs.db
