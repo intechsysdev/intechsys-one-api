@@ -99,6 +99,57 @@ jobs:
           slot-name: 'Production'
           package: ./publish
 
+      - name: Fijar comando de arranque y reiniciar
+        # El contenedor Linux estaba sirviendo la app por defecto (hostingstart) en vez
+        # de la nuestra. Con el comando explícito no depende de la autodetección de Oryx.
+        run: |
+          set -e
+          APP='${{ env.AZURE_WEBAPP_NAME }}'
+          RG=$(az webapp list --query "[?name=='$APP'].resourceGroup | [0]" -o tsv)
+          az webapp config set -n "$APP" -g "$RG" --startup-file 'dotnet One.Api.dll' -o none
+          az webapp restart -n "$APP" -g "$RG" -o none
+
+      - name: Diagnóstico del App Service
+        if: always()
+        # Publica la configuración real del sitio como anotaciones del run: así queda
+        # visible en el resumen del workflow sin tener que abrir el portal de Azure.
+        run: |
+          set +e
+          APP='${{ env.AZURE_WEBAPP_NAME }}'
+          RG=$(az webapp list --query "[?name=='$APP'].resourceGroup | [0]" -o tsv)
+          echo "::warning title=RG::$APP en grupo '$RG'"
+
+          CFG=$(az webapp show -n "$APP" -g "$RG" \
+            --query "{kind:kind, state:state, stack:siteConfig.linuxFxVersion, net:siteConfig.netFrameworkVersion, cmd:siteConfig.appCommandLine, alwaysOn:siteConfig.alwaysOn}" \
+            -o json | tr -d '\n')
+          echo "::warning title=SiteConfig::$CFG"
+
+          NAMES=$(az webapp config appsettings list -n "$APP" -g "$RG" --query "[].name" -o json | tr -d '\n')
+          echo "::warning title=AppSettings::$NAMES"
+
+          CONN=$(az webapp config connection-string list -n "$APP" -g "$RG" --query "[].name" -o json | tr -d '\n')
+          echo "::warning title=ConnectionStrings::$CONN"
+
+          # Contenido real de /home/site/wwwroot vía Kudu: si One.Api.dll no está en la
+          # raíz, el paquete aterrizó en una subcarpeta y el arranque nunca lo encuentra.
+          SCM=$(az webapp show -n "$APP" -g "$RG" --query "hostNames[?contains(@,'scm')] | [0]" -o tsv)
+          TOKEN=$(az account get-access-token --query accessToken -o tsv)
+          FILES=$(curl -s --max-time 40 -H "Authorization: Bearer $TOKEN" "https://$SCM/api/vfs/site/wwwroot/" \
+            | python3 -c "import json,sys;print(', '.join(sorted(e['name'] for e in json.load(sys.stdin))[:40]))" 2>/dev/null)
+          echo "::warning title=wwwroot::${FILES:-no se pudo listar (¿SCM restringido?)}"
+
+          az webapp log download -n "$APP" -g "$RG" --log-file /tmp/logs.zip >/dev/null 2>&1
+          if [ -f /tmp/logs.zip ]; then
+            mkdir -p /tmp/logs && unzip -o -q /tmp/logs.zip -d /tmp/logs
+            find /tmp/logs -type f \( -name '*.log' -o -name '*.txt' \) -exec tail -n 30 {} + 2>/dev/null \
+              | tail -n 50 | while IFS= read -r line; do
+                  printf '::warning title=ContainerLog::%s\n' "$(printf '%s' "$line" | tr -d '\r' | cut -c1-350)"
+                done
+          else
+            echo "::warning title=ContainerLog::No se pudieron descargar los logs; revisa que el logging de aplicación esté encendido."
+          fi
+          exit 0
+
       - name: Verificar health check
         # El arranque aplica las migraciones; si fallan, el health check no responde
         # y el despliegue queda marcado en rojo en vez de pasar en silencio.
