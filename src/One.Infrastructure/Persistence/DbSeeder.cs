@@ -26,6 +26,13 @@ public sealed class DbSeeder(
 
     public async Task RunAsync(CancellationToken ct = default)
     {
+        var pending = (await db.Database.GetPendingMigrationsAsync(ct)).ToArray();
+
+        if (pending.Length == 0)
+            logger.LogInformation("Sin migraciones pendientes.");
+        else
+            logger.LogInformation("Aplicando {Count} migración(es): {Migrations}", pending.Length, string.Join(", ", pending));
+
         await db.Database.MigrateAsync(ct);
 
         if (!_options.Enabled)

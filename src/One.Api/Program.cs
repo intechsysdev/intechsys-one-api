@@ -75,11 +75,26 @@ builder.Services.AddAuthorizationBuilder()
 
 // ── Infraestructura HTTP ───────────────────────────────────────────────────
 const string CorsPolicy = "one-front";
+
+// Orígenes exactos del portal. En App Service se sobreescriben con
+// Cors__AllowedOrigins__0, Cors__AllowedOrigins__1, ...
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
                      ?? ["http://localhost:5173", "https://localhost:5173"];
 
+// Comodines para los entornos de preview de Static Web Apps, que cambian de host
+// en cada pull request (jolly-tree-....<región>.6.azurestaticapps.net).
+var allowedOriginPatterns = builder.Configuration.GetSection("Cors:AllowedOriginPatterns").Get<string[]>() ?? [];
+
+var corsOrigins = allowedOrigins
+    .Concat(allowedOriginPatterns)
+    .Where(origin => !string.IsNullOrWhiteSpace(origin))
+    .Select(origin => origin.TrimEnd('/'))
+    .Distinct(StringComparer.OrdinalIgnoreCase)
+    .ToArray();
+
 builder.Services.AddCors(options => options.AddPolicy(CorsPolicy, policy => policy
-    .WithOrigins(allowedOrigins)
+    .WithOrigins(corsOrigins)
+    .SetIsOriginAllowedToAllowWildcardSubdomains()
     .AllowAnyHeader()
     .AllowAnyMethod()
     .WithExposedHeaders("X-Config-Version", "X-Token-Expired")
@@ -162,11 +177,28 @@ app.MapUserEndpoints();
 app.MapDashboardEndpoints();
 app.MapIntegrationEndpoints();
 
-// Migraciones y datos iniciales antes de aceptar tráfico.
+// Migraciones y datos iniciales antes de aceptar tráfico: se ejecutan en cada
+// arranque, de modo que cada publicación deja la base al día automáticamente.
 using (var scope = app.Services.CreateScope())
 {
-    var seeder = scope.ServiceProvider.GetRequiredService<DbSeeder>();
-    await seeder.RunAsync();
+    var startupLogger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("One.Startup");
+
+    try
+    {
+        startupLogger.LogInformation("Aplicando migraciones pendientes y datos iniciales…");
+
+        var seeder = scope.ServiceProvider.GetRequiredService<DbSeeder>();
+        await seeder.RunAsync();
+
+        startupLogger.LogInformation("Base de datos lista.");
+    }
+    catch (Exception ex)
+    {
+        // Sin base no hay API: se deja rastro explícito en el log de App Service y se aborta
+        // el arranque para que el despliegue falle en vez de servir tráfico roto.
+        startupLogger.LogCritical(ex, "No se pudo preparar la base de datos. Se aborta el arranque.");
+        throw;
+    }
 }
 
 app.Run();
